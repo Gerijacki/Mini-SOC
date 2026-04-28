@@ -1,0 +1,126 @@
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION:-8.13.0}
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "${ES_PORT:-9200}:9200"
+    networks:
+      - soc-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE '\"status\":\"(green|yellow)\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION:-8.13.0}
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - xpack.security.enabled=false
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q 'available'"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION:-8.13.0}
+    user: root
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - logs-volume:/logs:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    command: filebeat -e --strict.perms=false
+    restart: unless-stopped
+
+  log-generator:
+    build: ./log-generator
+    env_file: .env
+    volumes:
+      - logs-volume:/logs
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    restart: unless-stopped
+
+  detection-api:
+    build: ./detection-api
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    restart: unless-stopped
+    # python:3.12-slim has no curl — use Python's stdlib instead
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  response-system:
+    build: ./response-system
+    env_file: .env
+    ports:
+      - "8001:8001"
+    depends_on:
+      detection-api:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+
+  kibana-setup:
+    build: ./kibana/setup
+    env_file: .env
+    environment:
+      - KIBANA_HOST=http://kibana:5601
+    depends_on:
+      kibana:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - soc-net
+    restart: "no"
+
+volumes:
+  esdata:
+  logs-volume:
+
+networks:
+  soc-net:
+    driver: bridge

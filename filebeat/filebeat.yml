@@ -1,0 +1,32 @@
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /logs/auth.log*
+    # CRITICAL: lift JSON fields to root level so source_ip, action, status
+    # are available as top-level ES fields (detection queries depend on this)
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.message_key: message
+    close_inactive: 5m
+    scan_frequency: 2s
+    harvester_buffer_size: 16384
+
+processors:
+  - drop_fields:
+      fields: ["agent", "ecs", "input", "log"]
+      ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["${ES_HOST:http://elasticsearch:9200}"]
+  index: "soc-logs-%{+yyyy.MM.dd}"
+
+setup.ilm.enabled: false
+setup.template.name: "soc-logs"
+setup.template.pattern: "soc-logs-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 0
+
+logging.level: info
+logging.to_files: false
