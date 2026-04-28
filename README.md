@@ -2,40 +2,45 @@
 
 A professional-grade, fully containerized Security Operations Center pipeline built for learning
 and portfolio demonstration. Generates realistic attack simulations, ships logs through Filebeat
-into Elasticsearch, detects threats with a Python detection engine, triggers automated responses,
-and visualizes everything in Kibana.
+into Elasticsearch, detects threats with a Python detection engine, enriches alerts with MITRE
+ATT&CK intelligence via a local RAG system, triggers automated responses, and visualizes
+everything in Kibana and an interactive 3D graph.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            Docker Network: soc-net                           │
-│                                                                               │
-│  log-generator ──(JSON logs)──► /logs/auth.log                               │
-│                                        │                                     │
-│  filebeat ◄──────────────────(tails)───┘                                     │
-│      │                                                                        │
-│      └──(HTTP 9200)──► elasticsearch ◄──────────────────────────────┐        │
-│                              │                                       │        │
-│                         kibana :5601               detection-api :8000        │
-│                         SOC Dashboard              polls ES every 15s         │
-│                         Stack Alerts               writes soc-alerts          │
-│                                                         │                     │
-│                                                   response-system :8001       │
-│                                                   simulates/blocks IPs        │
-│                                                   writes soc-blocked-ips      │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│                               Docker Network: soc-net                                │
+│                                                                                      │
+│  log-generator ──(JSON logs)──► /logs/auth.log                                       │
+│                                        │                                             │
+│  filebeat ◄──────────────────(tails)───┘                                             │
+│      │                                                                               │
+│      └──(HTTP 9200)──► elasticsearch ◄──────────────────────────────────┐            │
+│                              │                                          │            │
+│                         kibana :5601              detection-api :8000   │            │
+│                         SOC Dashboard             polls ES every 15s    │            │
+│                         Stack Alerts              writes soc-alerts     │            │
+│                                                         │               │            │
+│                                              ┌──────────┴────────┐      │            │
+│                                              ▼                   ▼      │            │
+│                                    rag-enricher :8003   response-system :8001        │
+│                                    ChromaDB (local)     simulates/blocks IPs         │
+│                                    MITRE ATT&CK RAG     writes soc-blocked-ips       │
+│                                    3D viz /viz                                       │
+└──────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Pipeline
 
 ```
 Log Generator → Filebeat → Elasticsearch → Detection API → Response System
-                                ↓                ↓
-                             Kibana          soc-alerts
-                          SOC Overview     soc-blocked-ips
+                                ↓                ↓               ↓
+                             Kibana          RAG Enricher    soc-blocked-ips
+                          SOC Overview      MITRE ATT&CK
+                                            3D Graph /viz
 ```
 
 ---
@@ -50,6 +55,8 @@ Log Generator → Filebeat → Elasticsearch → Detection API → Response Syst
 | Log Shipping | Filebeat 8.13 |
 | Detection Engine | Python 3.12 + FastAPI + APScheduler |
 | Response System | Python 3.12 + FastAPI |
+| RAG Enrichment | Python 3.12 + FastAPI + ChromaDB + sentence-transformers |
+| 3D Visualization | Three.js + 3d-force-graph (served from RAG service) |
 | Log Generator | Python 3.12 + Faker |
 | Testing | pytest + pytest-mock |
 
@@ -70,6 +77,43 @@ Log Generator → Filebeat → Elasticsearch → Detection API → Response Syst
 | `SuspiciousCommandRule` | Dangerous command patterns in shell logs within 60s | medium → critical |
 
 All rules include **alert deduplication** — no alert storms during active attacks.
+
+### RAG Threat Intelligence Enrichment
+Every alert generated by a detection rule is automatically enriched with MITRE ATT&CK context before being persisted to Elasticsearch:
+
+1. The Detection API calls `POST /enrich` on the RAG service with the alert's rule name, severity, and details.
+2. The RAG service encodes the alert as a vector using `sentence-transformers/all-MiniLM-L6-v2` (local, no API key).
+3. A cosine similarity search in ChromaDB returns the top-3 most relevant MITRE ATT&CK techniques from the knowledge base (20 techniques covering the three detection rule scenarios).
+4. The alert's `details` dict is annotated with the enrichment before being written to `soc-alerts`.
+
+Enrichment fields added to each alert:
+
+| Field | Example |
+|---|---|
+| `mitre_techniques` | `["T1110", "T1078"]` |
+| `mitre_tactics` | `["Credential Access"]` |
+| `threat_summary` | `"Brute Force (T1110): Use MFA… \| Valid Accounts (T1078): …"` |
+| `threat_confidence` | `0.87` |
+| `mitre_urls` | `["https://attack.mitre.org/techniques/T1110/"]` |
+
+The enrichment call is **best-effort** (3 s timeout, `try/except`) — the detection pipeline never blocks if the RAG service is unavailable.
+
+### 3D Attack Intelligence Graph
+Available at **`http://localhost:8003/viz`** — an interactive Three.js force-directed graph rendered in the browser:
+
+| Node type | Shape | Color |
+|---|---|---|
+| MITRE technique | Sphere | By tactic (see legend) |
+| Alert | Diamond (larger) | By severity: critical=red, high=orange, medium=yellow |
+| Attacker IP | Sphere | Green, scaled by alert count |
+
+| Edge type | Appearance |
+|---|---|
+| Technique similarity | Thin white line (cosine similarity > 0.55 between embeddings) |
+| Alert → MITRE technique | Orange animated particles |
+| IP → Alert | Green animated particles |
+
+Click any node for a detail panel with metadata, MITRE URL, mitigation guidance, and timestamps. Auto-rotates; pauses on interaction.
 
 ### Automated Response
 - **Simulate mode** (default): logs `[SIMULATED] Would block IP X via iptables`
@@ -102,19 +146,18 @@ Three native Kibana alerting rules visible under **Stack Management → Rules**:
 **Requirements:** Docker Desktop with at least 4 GB RAM allocated.
 
 ```bash
-# Clone and start
 git clone https://github.com/Gerijacki/Mini-SOC
 cd Mini-SOC
 
-# Start everything (first run pulls ~2 GB of images)
+# Start everything (first run pulls ~2 GB of images; rag-enricher build ~5 min)
 docker compose up --build
 
 # Wait ~2 minutes for Elasticsearch to initialize, then:
-open http://localhost:5601          # Kibana
-# Navigate to: Dashboards → SOC Overview
+open http://localhost:5601          # Kibana — Dashboards → SOC Overview
+open http://localhost:8003/viz      # 3D Attack Intelligence Graph
 ```
 
-Logs start flowing immediately. Kibana data appears within 30 seconds of Elasticsearch being ready.
+Logs start flowing immediately. Kibana data appears within 30 seconds of Elasticsearch being ready. The RAG service seeds its vector DB (~20 s) and begins enriching alerts automatically.
 
 ---
 
@@ -128,6 +171,13 @@ Logs start flowing immediately. Kibana data appears within 30 seconds of Elastic
 | `http://localhost:5601/app/discover` | Raw log explorer |
 | `http://localhost:5601/app/management/insightsAndAlerting/triggersActions/rules` | Stack alerting rules |
 
+### 3D Graph
+
+| URL | Description |
+|---|---|
+| `http://localhost:8003/viz` | Interactive 3D attack graph |
+| `http://localhost:8003/viz/data` | Raw graph JSON (nodes + links) |
+
 ### Detection API
 
 ```bash
@@ -140,8 +190,26 @@ curl http://localhost:8000/rules
 # Manually trigger a detection cycle (don't wait 15s)
 curl -X POST http://localhost:8000/trigger
 
-# Latest alerts
+# Latest alerts (includes MITRE enrichment fields)
 curl http://localhost:8000/alerts
+```
+
+### RAG Enricher
+
+```bash
+# Health check — reports ChromaDB collection count and model name
+curl http://localhost:8003/health
+
+# List all seeded MITRE technique IDs
+curl http://localhost:8003/status
+
+# Full technique metadata (id, name, tactic, mitigation, snippet)
+curl http://localhost:8003/collection
+
+# Manual enrichment query
+curl -X POST http://localhost:8003/enrich \
+  -H "Content-Type: application/json" \
+  -d '{"rule_name":"BruteForceRule","source_ip":"185.220.101.45","severity":"critical","details":{}}'
 ```
 
 ### Response System
@@ -184,6 +252,8 @@ All configuration lives in `.env` (copy from `.env.example`):
 | `BRUTE_FORCE_WINDOW` | `60` | Lookback window for brute force (seconds) |
 | `RESPONSE_MODE` | `simulate` | `simulate` or `enforce` (real iptables) |
 | `BLOCK_DURATION` | `3600` | Simulated block duration (seconds) |
+| `ES_HOST` | `http://elasticsearch:9200` | Elasticsearch URL (used by RAG enricher) |
+| `CHROMA_DATA_PATH` | `/chroma/data` | ChromaDB persistence directory |
 
 ---
 
@@ -191,7 +261,7 @@ All configuration lives in `.env` (copy from `.env.example`):
 
 ```
 soc/
-├── docker-compose.yml           # 7 services, shared networking
+├── docker-compose.yml           # 8 services, shared networking
 ├── .env                         # Runtime config (not committed)
 ├── .env.example                 # Config template
 │
@@ -227,6 +297,13 @@ soc/
 │   └── tests/
 │       └── test_responder.py    # 11 unit tests
 │
+├── rag-enricher/                # RAG threat intelligence service
+│   ├── main.py                  # FastAPI: /enrich, /collection, /health, /viz, /viz/data
+│   ├── seeder.py                # MITRE ATT&CK knowledge base + ChromaDB seeding
+│   ├── viz.html                 # 3D force-graph visualization (served at /viz)
+│   ├── Dockerfile               # Builds C++ extensions + pre-downloads embedding model
+│   └── requirements.txt
+│
 └── kibana/
     └── setup/
         └── init_kibana.py       # Auto-configures Kibana on startup
@@ -239,7 +316,7 @@ soc/
 | Index | Created by | Content |
 |---|---|---|
 | `soc-logs-{yyyy.MM.dd}` | Filebeat | Raw attack and normal events |
-| `soc-alerts` | Detection API | Triggered detection alerts |
+| `soc-alerts` | Detection API | Triggered alerts with MITRE enrichment |
 | `soc-blocked-ips` | Response System | IP block audit records |
 
 ### Key Log Fields
@@ -256,6 +333,25 @@ soc/
   "hostname": "web-server-01",
   "scenario": "brute_force",
   "message": "Failed password for admin from 185.220.101.45 port 54321 ssh2"
+}
+```
+
+### Enriched Alert Fields
+
+```json
+{
+  "@timestamp": "2026-04-27T14:23:26.000Z",
+  "rule_name": "BruteForceRule",
+  "source_ip": "185.220.101.45",
+  "severity": "critical",
+  "event_count": 9,
+  "details": {
+    "mitre_techniques": ["T1110", "T1078"],
+    "mitre_tactics": ["Credential Access"],
+    "threat_summary": "Brute Force (T1110): Use MFA… | Valid Accounts (T1078): …",
+    "threat_confidence": 0.87,
+    "mitre_urls": ["https://attack.mitre.org/techniques/T1110/"]
+  }
 }
 ```
 
@@ -303,6 +399,14 @@ pytest tests/ -v
 **Alert deduplication** — each rule checks for an existing alert with the same `source_ip + rule_name` within the last 5 minutes before writing a new one, preventing alert storms during active attacks.
 
 **Separate response-system service** — the webhook pattern (`POST /respond`) decouples detection from response. The response service can evolve independently (SOAR integration, firewall APIs) without touching detection logic.
+
+**RAG enrichment is best-effort** — the `POST /enrich` call has a 3-second timeout and is wrapped in `try/except`. If the RAG service is slow or unavailable, the detection pipeline continues unaffected; alerts are written without enrichment.
+
+**ChromaDB PersistentClient over a separate HTTP service** — embedding storage runs inside the `rag-enricher` container with a named Docker volume for persistence. Removes a network hop and a service dependency while still providing a production-grade vector store.
+
+**sentence-transformers pre-downloaded at build time** — the `all-MiniLM-L6-v2` model (~90 MB) is downloaded during `docker build`, not at container startup. This avoids a slow first-run delay and keeps startup time predictable.
+
+**CPU-only PyTorch** — installed via `--index-url https://download.pytorch.org/whl/cpu`, reducing the image footprint by ~550 MB vs the default GPU variant.
 
 **`xpack.security.enabled=false`** — Elasticsearch 8.x enables TLS+auth by default. Disabled here to avoid certificate complexity in development.
 

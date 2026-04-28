@@ -22,6 +22,7 @@ logger = logging.getLogger("detection-api")
 
 POLL_INTERVAL = int(os.getenv("DETECTION_POLL_INTERVAL", "15"))
 RESPONSE_URL = "http://response-system:8001/respond"
+RAG_URL = "http://rag-enricher:8003/enrich"
 INDEX_ALERTS = os.getenv("INDEX_ALERTS", "soc-alerts")
 
 RULES = [BruteForceRule(), AnomalousLoginRule(), SuspiciousCommandRule()]
@@ -50,6 +51,26 @@ def run_detection_cycle() -> None:
             logger.error("Rule %s failed: %s", rule.name, exc)
 
     for alert in cycle_alerts:
+        try:
+            with httpx.Client(timeout=3.0) as http:
+                resp = http.post(RAG_URL, json={
+                    "rule_name": alert.rule_name,
+                    "source_ip": alert.source_ip,
+                    "severity": alert.severity.value,
+                    "details": alert.details,
+                })
+                if resp.status_code == 200:
+                    enrichment = resp.json()
+                    if enrichment:
+                        alert.details.update(enrichment)
+                        logger.info(
+                            "Alert enriched — techniques=%s confidence=%.2f",
+                            enrichment.get("mitre_techniques", []),
+                            enrichment.get("threat_confidence", 0),
+                        )
+        except Exception as exc:
+            logger.debug("RAG enrichment unavailable: %s", exc)
+
         try:
             doc = alert.to_es_doc()
             alert_id = esc.write_alert(client, doc)

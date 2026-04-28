@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SOC — Attack Intelligence Graph</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #040c18;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+      color: #8ab4d4;
+    }
+
+    #graph { width: 100vw; height: 100vh; }
+
+    /* ---------- shared panel ---------- */
+    .panel {
+      position: fixed;
+      background: rgba(4, 18, 36, 0.88);
+      border: 1px solid rgba(0, 180, 255, 0.25);
+      border-radius: 6px;
+      padding: 12px 16px;
+      backdrop-filter: blur(4px);
+      pointer-events: none;
+    }
+    .panel h2 {
+      color: #00e5aa;
+      font-size: 11px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    /* ---------- stats (top-left) ---------- */
+    #stats { top: 16px; left: 16px; min-width: 190px; }
+    .stat-row { display: flex; justify-content: space-between; gap: 16px; margin: 5px 0; font-size: 11px; }
+    .stat-val { color: #fff; font-weight: 700; font-size: 13px; }
+
+    /* ---------- title (top-center) ---------- */
+    #title {
+      position: fixed;
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      color: rgba(0, 229, 170, 0.45);
+      pointer-events: none;
+    }
+
+    /* ---------- legend (bottom-right) ---------- */
+    #legend { bottom: 16px; right: 16px; font-size: 11px; }
+    .legend-section { margin-bottom: 8px; }
+    .legend-section:last-child { margin-bottom: 0; }
+    .l-item { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .l-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .l-sq  { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; transform: rotate(45deg); }
+    .l-tri { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; flex-shrink: 0; }
+    hr.l-sep { border: none; border-top: 1px solid rgba(0,180,255,0.15); margin: 7px 0; }
+
+    /* ---------- detail panel (top-right) ---------- */
+    #detail {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      width: 270px;
+      background: rgba(4, 18, 36, 0.92);
+      border: 1px solid rgba(0, 229, 170, 0.4);
+      border-radius: 6px;
+      padding: 14px;
+      display: none;
+      pointer-events: auto;
+      font-size: 11px;
+    }
+    #detail h3 { color: #00e5aa; font-size: 13px; margin-bottom: 10px; padding-right: 18px; line-height: 1.3; }
+    .d-close { position: absolute; top: 10px; right: 12px; cursor: pointer; color: #ff4455; font-size: 14px; }
+    .d-field { margin: 7px 0; }
+    .d-label { color: #00b4ff; font-size: 9px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 2px; }
+    .d-value { color: #dde; line-height: 1.4; word-break: break-word; }
+    .d-value a { color: #00e5aa; text-decoration: none; }
+    .d-value a:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 3px;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: 1px;
+    }
+
+    /* ---------- loading ---------- */
+    #loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 12px;
+      letter-spacing: 4px;
+      color: #00b4ff;
+      text-transform: uppercase;
+    }
+
+    /* ---------- hint ---------- */
+    #hint {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: rgba(100, 160, 210, 0.4);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="title">SOC · ATTACK INTELLIGENCE · VECTOR SPACE</div>
+<div id="graph"></div>
+<div id="loading">▶ LOADING VECTOR SPACE...</div>
+
+<div class="panel" id="stats">
+  <h2>◈ graph status</h2>
+  <div class="stat-row"><span>MITRE Techniques</span><span class="stat-val" id="s-tech">—</span></div>
+  <div class="stat-row"><span>Active Alerts</span><span class="stat-val" id="s-alert">—</span></div>
+  <div class="stat-row"><span>Attacker IPs</span><span class="stat-val" id="s-ip">—</span></div>
+  <div class="stat-row"><span>Connections</span><span class="stat-val" id="s-link">—</span></div>
+</div>
+
+<div class="panel" id="legend">
+  <h2>◈ node legend</h2>
+  <div class="legend-section">
+    <div class="l-item"><div class="l-dot" style="background:#e74c3c"></div>Credential Access</div>
+    <div class="l-item"><div class="l-dot" style="background:#e67e22"></div>Execution</div>
+    <div class="l-item"><div class="l-dot" style="background:#9b59b6"></div>Command & Control</div>
+    <div class="l-item"><div class="l-dot" style="background:#3498db"></div>Lateral Movement</div>
+    <div class="l-item"><div class="l-dot" style="background:#2ecc71"></div>Discovery</div>
+    <div class="l-item"><div class="l-dot" style="background:#f39c12"></div>Persistence</div>
+    <div class="l-item"><div class="l-dot" style="background:#1abc9c"></div>Privilege Escalation</div>
+    <div class="l-item"><div class="l-dot" style="background:#95a5a6"></div>Defense Evasion</div>
+    <div class="l-item"><div class="l-dot" style="background:#e91e63"></div>Exfiltration</div>
+    <div class="l-item"><div class="l-dot" style="background:#00bcd4"></div>Initial Access</div>
+  </div>
+  <hr class="l-sep">
+  <div class="legend-section">
+    <div class="l-item"><div class="l-sq" style="background:#ff2233"></div>Alert — Critical</div>
+    <div class="l-item"><div class="l-sq" style="background:#ff7700"></div>Alert — High</div>
+    <div class="l-item"><div class="l-sq" style="background:#ffcc00"></div>Alert — Medium</div>
+    <div class="l-item"><div class="l-dot" style="background:#00ff88; border-radius:50%"></div>Attacker IP</div>
+  </div>
+  <hr class="l-sep">
+  <div style="font-size:10px; color:rgba(100,160,210,0.6);">
+    <div>━━ technique similarity</div>
+    <div>⇢⇢ alert → technique (particle)</div>
+    <div>⇢  ip → alert (particle)</div>
+  </div>
+</div>
+
+<div id="detail">
+  <span class="d-close" id="d-close">✕</span>
+  <h3 id="d-title"></h3>
+  <div id="d-body"></div>
+</div>
+
+<div id="hint">click a node to inspect · drag to rotate · scroll to zoom</div>
+
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+<script>
+  // ── Colors ────────────────────────────────────────────────────────────────
+  const TACTIC_COLOR = {
+    'Credential Access':   '#e74c3c',
+    'Execution':           '#e67e22',
+    'Command and Control': '#9b59b6',
+    'Lateral Movement':    '#3498db',
+    'Discovery':           '#2ecc71',
+    'Persistence':         '#f39c12',
+    'Privilege Escalation':'#1abc9c',
+    'Defense Evasion':     '#95a5a6',
+    'Exfiltration':        '#e91e63',
+    'Initial Access':      '#00bcd4',
+  };
+
+  const SEV_COLOR = {
+    critical: '#ff2233',
+    high:     '#ff7700',
+    medium:   '#ffcc00',
+    low:      '#888888',
+  };
+
+  function nodeColor(n) {
+    if (n.type === 'technique') return TACTIC_COLOR[n.tactic] || '#8888aa';
+    if (n.type === 'alert')     return SEV_COLOR[n.severity] || '#ff7700';
+    if (n.type === 'ip')        return '#00ff88';
+    return '#ffffff';
+  }
+
+  function linkColor(l) {
+    if (l.type === 'similarity')     return 'rgba(80,130,190,0.20)';
+    if (l.type === 'alert_technique')return 'rgba(255,100,40,0.65)';
+    if (l.type === 'ip_alert')       return 'rgba(0,255,136,0.45)';
+    return 'rgba(255,255,255,0.15)';
+  }
+
+  function linkWidth(l) {
+    if (l.type === 'similarity')      return l.value * 1.8;
+    if (l.type === 'alert_technique') return 2;
+    return 1;
+  }
+
+  // ── Detail panel ─────────────────────────────────────────────────────────
+  document.getElementById('d-close').onclick = () => {
+    document.getElementById('detail').style.display = 'none';
+  };
+
+  function field(label, value) {
+    return `<div class="d-field"><div class="d-label">${label}</div><div class="d-value">${value}</div></div>`;
+  }
+
+  function showDetail(node) {
+    document.getElementById('d-title').textContent = node.name || node.id;
+    let html = '';
+
+    if (node.type === 'technique') {
+      const color = TACTIC_COLOR[node.tactic] || '#888';
+      html += field('Technique ID', `<span style="color:#00e5aa;font-weight:700">${node.id}</span>`);
+      html += field('Tactic', `<span class="badge" style="background:${color}22;color:${color};border:1px solid ${color}44">${node.tactic}</span>`);
+      html += field('Mitigation', node.mitigation);
+      html += field('MITRE Reference', `<a href="${node.url}" target="_blank">↗ ${node.url}</a>`);
+    } else if (node.type === 'alert') {
+      const color = SEV_COLOR[node.severity] || '#ff7700';
+      html += field('Rule', `<span style="color:#fff;font-weight:700">${node.name}</span>`);
+      html += field('Severity', `<span class="badge" style="background:${color}33;color:${color};border:1px solid ${color}55">${(node.severity||'').toUpperCase()}</span>`);
+      html += field('Source IP', `<span style="color:#00ff88">${node.source_ip}</span>`);
+      html += field('Timestamp', node.timestamp ? node.timestamp.replace('T',' ').split('.')[0]+' UTC' : '—');
+    } else if (node.type === 'ip') {
+      html += field('IP Address', `<span style="color:#00ff88;font-size:14px;font-weight:700">${node.name}</span>`);
+      html += field('Alerts Triggered', `<span style="color:#fff;font-size:13px">${node.count || 1}</span>`);
+    }
+
+    document.getElementById('d-body').innerHTML = html;
+    document.getElementById('detail').style.display = 'block';
+  }
+
+  // ── Build graph ──────────────────────────────────────────────────────────
+  fetch('/viz/data')
+    .then(r => r.json())
+    .then(({ nodes, links }) => {
+      document.getElementById('loading').style.display = 'none';
+
+      const tech   = nodes.filter(n => n.type === 'technique').length;
+      const alerts = nodes.filter(n => n.type === 'alert').length;
+      const ips    = nodes.filter(n => n.type === 'ip').length;
+      document.getElementById('s-tech').textContent  = tech;
+      document.getElementById('s-alert').textContent = alerts;
+      document.getElementById('s-ip').textContent    = ips;
+      document.getElementById('s-link').textContent  = links.length;
+
+      const Graph = ForceGraph3D()(document.getElementById('graph'))
+        .backgroundColor('#040c18')
+        .graphData({ nodes, links })
+
+        // Nodes
+        .nodeColor(nodeColor)
+        .nodeVal(n => n.val || 4)
+        .nodeOpacity(0.88)
+        .nodeResolution(12)
+        .nodeLabel(n => {
+          if (n.type === 'technique')
+            return `<b style="color:#00e5aa">${n.id}</b> ${n.name}<br><i style="color:${TACTIC_COLOR[n.tactic]||'#888'}">${n.tactic}</i>`;
+          if (n.type === 'alert')
+            return `<b style="color:${SEV_COLOR[n.severity]||'#ff7'}">${n.name}</b><br>IP: ${n.source_ip}<br>Severity: ${n.severity}`;
+          if (n.type === 'ip')
+            return `<b style="color:#00ff88">${n.name}</b><br>Alerts: ${n.count || 1}`;
+          return n.id;
+        })
+
+        // Links
+        .linkColor(linkColor)
+        .linkWidth(linkWidth)
+        .linkOpacity(0.7)
+        .linkDirectionalParticles(l => (l.type !== 'similarity') ? 3 : 0)
+        .linkDirectionalParticleWidth(l => l.type === 'alert_technique' ? 2.5 : 1.5)
+        .linkDirectionalParticleSpeed(0.006)
+        .linkDirectionalParticleColor(linkColor)
+
+        // Interaction
+        .onNodeClick(showDetail)
+        .showNavInfo(false);
+
+      // Gentle auto-rotation that pauses on user drag
+      let rotating = true;
+      let angle = 0;
+      const el = document.getElementById('graph');
+      el.addEventListener('mousedown', () => { rotating = false; });
+      el.addEventListener('mouseup',   () => { setTimeout(() => { rotating = true; }, 3000); });
+      el.addEventListener('touchstart',() => { rotating = false; });
+      el.addEventListener('touchend',  () => { setTimeout(() => { rotating = true; }, 3000); });
+
+      setInterval(() => {
+        if (!rotating) return;
+        angle += 0.0025;
+        const dist = 320;
+        Graph.cameraPosition({
+          x: dist * Math.sin(angle),
+          y: 90,
+          z: dist * Math.cos(angle),
+        });
+      }, 33);
+    })
+    .catch(err => {
+      document.getElementById('loading').textContent = '✕ ERROR: ' + err.message;
+    });
+</script>
+</body>
+</html>

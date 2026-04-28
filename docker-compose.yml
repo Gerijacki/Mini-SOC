@@ -103,6 +103,22 @@ services:
     cap_add:
       - NET_ADMIN
 
+  rag-enricher:
+    build: ./rag-enricher
+    ports:
+      - "8003:8003"
+    networks:
+      - soc-net
+    volumes:
+      - chromadb-data:/chroma/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
   kibana-setup:
     build: ./kibana/setup
     env_file: .env
@@ -120,6 +136,7 @@ services:
 volumes:
   esdata:
   logs-volume:
+  chromadb-data:
 
 networks:
   soc-net:
