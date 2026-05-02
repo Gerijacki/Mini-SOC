@@ -4,7 +4,7 @@ import os
 from elasticsearch import Elasticsearch
 
 import es_client
-from models import Alert, AlertSeverity
+from models import Alert
 from rules.base import DetectionRule
 
 logger = logging.getLogger(__name__)

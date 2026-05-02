@@ -6,6 +6,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docker.com)
 [![pytest](https://img.shields.io/badge/pytest-52%20tests-0A9EDC?logo=pytest&logoColor=white)](https://pytest.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/Gerijacki/soc/actions/workflows/ci.yml/badge.svg)](https://github.com/Gerijacki/soc/actions/workflows/ci.yml)
 
 Eight Docker services that simulate real attack patterns, detect them with custom Python rules enriched by MITRE ATT&CK RAG, trigger automated IP blocking, and visualize everything in Kibana and an interactive 3D graph — running in under 5 minutes with one command.
 

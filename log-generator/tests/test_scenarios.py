@@ -1,8 +1,7 @@
 import re
-import pytest
 
 from scenarios import brute_force, suspicious_login, command_exec
-from utils.ip_pool import ATTACKER_IPS, TRUSTED_IPS, get_attacker_ip, get_trusted_ip, get_hostname
+from utils.ip_pool import ATTACKER_IPS, TRUSTED_IPS, get_attacker_ip, get_trusted_ip
 
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 REQUIRED_FIELDS = {"@timestamp", "log_type", "source_ip", "username", "action", "status",

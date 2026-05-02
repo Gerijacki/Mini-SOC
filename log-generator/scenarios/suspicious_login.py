@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from utils.ip_pool import get_attacker_ip, get_hostname
 
 INTERNAL_USERS = ["alice", "bob", "carlos", "diana", "engineer1", "jsmith", "mlopez"]

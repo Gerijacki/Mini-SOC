@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
-from seeder import COLLECTION_NAME, MITRE_TECHNIQUES, MODEL_NAME, seed_chromadb
+from seeder import MITRE_TECHNIQUES, MODEL_NAME, seed_chromadb
 
 logging.basicConfig(
     level=logging.INFO,
