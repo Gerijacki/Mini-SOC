@@ -12,7 +12,10 @@ INDEX_BLOCKED = os.getenv("INDEX_BLOCKED", "soc-blocked-ips")
 
 
 def get_client() -> Elasticsearch:
-    return Elasticsearch(hosts=[ES_HOST])
+    user = os.getenv("ELASTIC_USERNAME", "")
+    pw   = os.getenv("ELASTIC_PASSWORD", "")
+    kwargs: dict = {"basic_auth": (user, pw)} if user and pw else {}
+    return Elasticsearch(hosts=[ES_HOST], **kwargs)
 
 
 def wait_for_elasticsearch(max_retries: int = 30, delay: int = 5) -> Elasticsearch:

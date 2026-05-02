@@ -40,7 +40,10 @@ class AlertPayload(BaseModel):
 
 
 def get_es_client() -> Elasticsearch:
-    client = Elasticsearch(hosts=[ES_HOST])
+    user = os.getenv("ELASTIC_USERNAME", "")
+    pw   = os.getenv("ELASTIC_PASSWORD", "")
+    kwargs: dict = {"basic_auth": (user, pw)} if user and pw else {}
+    client = Elasticsearch(hosts=[ES_HOST], **kwargs)
     for _ in range(20):
         try:
             client.cluster.health(wait_for_status="yellow", timeout="5s")

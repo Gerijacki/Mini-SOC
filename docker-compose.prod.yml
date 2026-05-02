@@ -1,0 +1,104 @@
+# Production override — used with:
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d
+#
+# Before first run:
+#   1. cp .env.prod.example .env.prod  and fill in all passwords
+#   2. Create Elasticsearch service users (see DEPLOYMENT.md)
+#   3. docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod pull
+#   4. docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.prod up -d
+
+services:
+  elasticsearch:
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 1g
+
+  kibana:
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - ELASTICSEARCH_USERNAME=kibana_system
+      - ELASTICSEARCH_PASSWORD=${KIBANA_SYSTEM_PASSWORD}
+      - xpack.security.enabled=true
+      - xpack.encryptedSavedObjects.encryptionKey=${KIBANA_ENCRYPTION_KEY}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  filebeat:
+    volumes:
+      - ./filebeat/filebeat.prod.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/log:/var/log:ro
+      - /run/log/journal:/run/log/journal:ro
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - ELASTIC_USERNAME=filebeat_writer
+      - ELASTIC_PASSWORD=${FILEBEAT_WRITER_PASSWORD}
+    restart: always
+
+  log-generator:
+    # Disabled in production — real logs come from the host via Filebeat
+    profiles:
+      - dev-only
+
+  detection-api:
+    image: ${IMAGE_PREFIX:-ghcr.io/gerijacki/mini-soc}/detection-api:${TAG:-latest}
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - ELASTIC_USERNAME=detection_reader
+      - ELASTIC_PASSWORD=${DETECTION_READER_PASSWORD}
+      - INDEX_LOGS=soc-logs
+      - INDEX_ALERTS=soc-alerts
+      - INDEX_BLOCKED=soc-blocked-ips
+      - DETECTION_POLL_INTERVAL=${DETECTION_POLL_INTERVAL:-30}
+      - BRUTE_FORCE_THRESHOLD=${BRUTE_FORCE_THRESHOLD:-5}
+      - BRUTE_FORCE_WINDOW=${BRUTE_FORCE_WINDOW:-60}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  response-system:
+    image: ${IMAGE_PREFIX:-ghcr.io/gerijacki/mini-soc}/response-system:${TAG:-latest}
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+      - ELASTIC_USERNAME=response_writer
+      - ELASTIC_PASSWORD=${RESPONSE_WRITER_PASSWORD}
+      - RESPONSE_MODE=enforce
+      - BLOCK_DURATION=${BLOCK_DURATION:-3600}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  rag-enricher:
+    image: ${IMAGE_PREFIX:-ghcr.io/gerijacki/mini-soc}/rag-enricher:${TAG:-latest}
+    environment:
+      - ES_HOST=http://elasticsearch:9200
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 512m
+
+  kibana-setup:
+    environment:
+      - KIBANA_HOST=http://kibana:5601
+      - ELASTIC_USERNAME=kibana_setup
+      - ELASTIC_PASSWORD=${KIBANA_SETUP_PASSWORD}

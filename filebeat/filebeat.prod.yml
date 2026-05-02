@@ -1,0 +1,197 @@
+# Production Filebeat config — reads real Linux auth logs and normalizes them
+# to the same Elasticsearch field schema that the detection rules expect.
+#
+# Field contract (must match detection-api/rules/):
+#   source_ip  → keyword  — originating IP address
+#   status     → keyword  — "failure" | "success" | "executed"
+#   action     → keyword  — "ssh_login" | "command_execution"
+#   log_type   → keyword  — "auth" | "command"
+#   command    → keyword  — full command string (SuspiciousCommandRule)
+#   username   → keyword  — authenticated user
+#   hostname   → keyword  — host where the event occurred
+#
+# Usage (standalone):
+#   filebeat -e -c filebeat.prod.yml
+#
+# Usage (Docker — in docker-compose.prod.yml override):
+#   volume: ./filebeat/filebeat.prod.yml:/usr/share/filebeat/filebeat.yml:ro
+
+# ── Inputs ────────────────────────────────────────────────────────────────────
+
+filebeat.inputs:
+  # Primary: tail /var/log/auth.log (Ubuntu/Debian/RHEL with rsyslog)
+  - type: log
+    enabled: true
+    id: auth-log-file
+    paths:
+      - /var/log/auth.log
+      - /var/log/auth.log.1
+      - /var/log/secure         # RHEL/CentOS equivalent
+    close_inactive: 5m
+    scan_frequency: 2s
+
+  # Alternative: systemd journal (comment out the log input above when using this)
+  # Requires: usermod -aG systemd-journal filebeat
+  - type: journald
+    enabled: false
+    id: journald-auth
+    units:
+      - sshd.service
+      - sudo.service
+      - su.service
+      - systemd-logind.service
+
+# ── Processor chain ───────────────────────────────────────────────────────────
+# Normalizes raw syslog lines into the JSON schema that detection rules query.
+
+processors:
+  # Step 1: Parse the standard syslog header
+  # Input:  "May  1 14:23:11 web-server sshd[1234]: Failed password for..."
+  # Fields: syslog_month, syslog_day, syslog_time, hostname, program_pid, message_body
+  - dissect:
+      tokenizer: "%{syslog_month} %{syslog_day} %{syslog_time} %{hostname} %{program_pid}: %{message_body}"
+      field: "message"
+      target_prefix: ""
+      overwrite_keys: true
+      ignore_failure: true
+
+  # Step 2: Inject the current year — syslog format omits the year.
+  # Note: log rotation across year-end will produce wrong timestamps for
+  # rotated files re-read after Jan 1. Use type:syslog input for full RFC3164 parsing.
+  - script:
+      lang: javascript
+      id: fix_timestamp
+      source: >
+        function process(event) {
+          var month = event.Get("syslog_month");
+          var day   = event.Get("syslog_day");
+          var time  = event.Get("syslog_time");
+          if (!month || !day || !time) { return; }
+          var months = {
+            "Jan":"01","Feb":"02","Mar":"03","Apr":"04","May":"05","Jun":"06",
+            "Jul":"07","Aug":"08","Sep":"09","Oct":"10","Nov":"11","Dec":"12"
+          };
+          var year = new Date().getFullYear();
+          var mm   = months[month] || "01";
+          var dd   = ("0" + day.trim()).slice(-2);
+          event.Put("@timestamp", year + "-" + mm + "-" + dd + "T" + time + "Z");
+        }
+
+  # Step 3: Split "program[pid]" into separate fields
+  - dissect:
+      tokenizer: "%{program}[%{pid}]"
+      field: "program_pid"
+      target_prefix: ""
+      ignore_failure: true
+
+  # Step 4: Classify SSH authentication events (program = sshd)
+  # Handles: "Failed password", "Failed publickey", "Invalid user",
+  #          "Accepted password", "Accepted publickey"
+  - script:
+      lang: javascript
+      id: parse_ssh
+      source: >
+        function process(event) {
+          var body = event.Get("message_body") || "";
+          var prog = (event.Get("program") || "").toLowerCase();
+          if (prog !== "sshd") { return; }
+
+          var failedRe = /^Failed (?:password|publickey) for (?:invalid user )?(\S+) from ([\d.a-fA-F:]+) port (\d+)/;
+          var invalidRe = /^Invalid user (\S+) from ([\d.a-fA-F:]+)/;
+          var acceptedRe = /^Accepted (?:password|publickey) for (\S+) from ([\d.a-fA-F:]+) port (\d+)/;
+
+          var m;
+          if ((m = body.match(failedRe)) || (m = body.match(invalidRe))) {
+            event.Put("log_type",  "auth");
+            event.Put("action",    "ssh_login");
+            event.Put("status",    "failure");
+            event.Put("username",  m[1]);
+            event.Put("source_ip", m[2]);
+            if (m[3]) { event.Put("port", parseInt(m[3], 10)); }
+            return;
+          }
+
+          if ((m = body.match(acceptedRe))) {
+            event.Put("log_type",  "auth");
+            event.Put("action",    "ssh_login");
+            event.Put("status",    "success");
+            event.Put("username",  m[1]);
+            event.Put("source_ip", m[2]);
+            event.Put("port",      parseInt(m[3], 10));
+            return;
+          }
+
+          // Other sshd lines (Disconnecting, Connection closed, etc.) — tag but don't alert
+          event.Put("log_type", "auth");
+          event.Put("action",   "ssh_event");
+          event.Put("status",   "info");
+        }
+
+  # Step 5: Classify sudo command executions (program = sudo)
+  # Parses: "alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/wget ..."
+  # Note: sudo logs do not record the originating SSH source_ip.
+  # We set source_ip = hostname as a fallback. For accurate attribution, correlate
+  # via username + session timestamp with the preceding SSH auth event in Kibana.
+  - script:
+      lang: javascript
+      id: parse_sudo
+      source: >
+        function process(event) {
+          var body = event.Get("message_body") || "";
+          var prog = (event.Get("program") || "").toLowerCase();
+          if (prog !== "sudo") { return; }
+
+          var cmdRe  = /COMMAND=(.+)$/;
+          var userRe = /^(\S+)\s*:/;
+          var cmdMatch  = body.match(cmdRe);
+          if (!cmdMatch) { return; }
+
+          var userMatch = body.match(userRe);
+          event.Put("log_type", "command");
+          event.Put("action",   "command_execution");
+          event.Put("status",   "executed");
+          event.Put("command",  cmdMatch[1].trim());
+          if (userMatch) { event.Put("username", userMatch[1].trim()); }
+          if (!event.Get("source_ip")) {
+            event.Put("source_ip", event.Get("hostname") || "127.0.0.1");
+          }
+        }
+
+  # Step 6: Drop intermediate parsing fields and Filebeat metadata noise
+  - drop_fields:
+      fields:
+        - agent
+        - ecs
+        - input
+        - log
+        - syslog_month
+        - syslog_day
+        - syslog_time
+        - program_pid
+        - message_body
+      ignore_missing: true
+
+  # Step 7: Drop events with no log_type (kernel messages, PAM noise, cron, etc.)
+  # Remove this processor if you want all auth.log lines in Elasticsearch.
+  - drop_event:
+      when:
+        not:
+          has_fields: ["log_type"]
+
+# ── Output ────────────────────────────────────────────────────────────────────
+
+output.elasticsearch:
+  hosts: ["${ES_HOST:http://elasticsearch:9200}"]
+  username: "${ELASTIC_USERNAME:}"
+  password: "${ELASTIC_PASSWORD:}"
+  index: "soc-logs-%{+yyyy.MM.dd}"
+
+setup.ilm.enabled: false
+setup.template.name: "soc-logs"
+setup.template.pattern: "soc-logs-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 1
+
+logging.level: info
+logging.to_files: false

@@ -1,0 +1,109 @@
+# Windows Filebeat config — reads Windows Security Event Log and normalizes
+# to the same Elasticsearch field schema that the detection rules expect.
+#
+# Monitored Event IDs:
+#   4624 — Successful logon     → status: "success", action: "ssh_login"
+#   4625 — Failed logon         → status: "failure", action: "ssh_login"
+#   4688 — Process creation     → log_type: "command", command: <process path>
+#
+# Note: action="ssh_login" is used for Windows logon events (4624/4625) to
+# maintain field compatibility with existing detection rules without requiring
+# rule modifications. This is a deliberate semantic compromise documented here.
+#
+# Prerequisites:
+#   - Filebeat installed as a Windows service (install-service-filebeat.ps1)
+#   - Audit Policy: "Logon Events" and "Process Tracking" must be enabled
+#     (secpol.msc → Local Policies → Audit Policy)
+#
+# Usage:
+#   .\filebeat.exe -e -c filebeat.windows.yml
+
+# ── Inputs ────────────────────────────────────────────────────────────────────
+
+filebeat.inputs:
+  - type: winlog
+    name: Security
+    event_id: 4624, 4625, 4688
+    # Ignore machine accounts (end with $) to reduce noise
+    ignore_older: 72h
+
+# ── Processor chain ───────────────────────────────────────────────────────────
+
+processors:
+  # Normalize Windows event data to the shared SOC field schema
+  - script:
+      lang: javascript
+      id: normalize_windows_events
+      source: >
+        function process(event) {
+          var eid          = event.Get("winlog.event_id");
+          var targetUser   = event.Get("winlog.event_data.TargetUserName") || "";
+          var subjectUser  = event.Get("winlog.event_data.SubjectUserName") || "";
+          var ip           = event.Get("winlog.event_data.IpAddress") || "";
+          var processName  = event.Get("winlog.event_data.NewProcessName") || "";
+          var hostname     = event.Get("winlog.computer_name") || "unknown";
+
+          // Skip machine accounts (end with $) — high-volume, low-value noise
+          if (targetUser.slice(-1) === "$" || subjectUser.slice(-1) === "$") {
+            event.Cancel();
+            return;
+          }
+
+          // Normalize IP: "-" means local, "::1" means loopback
+          var sourceIp = (ip && ip !== "-" && ip !== "::1") ? ip : "127.0.0.1";
+
+          if (eid === 4624) {
+            event.Put("log_type",  "auth");
+            event.Put("action",    "ssh_login");
+            event.Put("status",    "success");
+            event.Put("username",  targetUser);
+            event.Put("source_ip", sourceIp);
+            event.Put("hostname",  hostname);
+          } else if (eid === 4625) {
+            event.Put("log_type",  "auth");
+            event.Put("action",    "ssh_login");
+            event.Put("status",    "failure");
+            event.Put("username",  targetUser);
+            event.Put("source_ip", sourceIp);
+            event.Put("hostname",  hostname);
+          } else if (eid === 4688) {
+            event.Put("log_type",  "command");
+            event.Put("action",    "command_execution");
+            event.Put("status",    "executed");
+            event.Put("command",   processName);
+            event.Put("username",  subjectUser);
+            event.Put("source_ip", "127.0.0.1");
+            event.Put("hostname",  hostname);
+          }
+        }
+
+  - drop_fields:
+      fields: ["agent", "ecs", "log", "input"]
+      ignore_missing: true
+
+  - drop_event:
+      when:
+        not:
+          has_fields: ["log_type"]
+
+# ── Output ────────────────────────────────────────────────────────────────────
+
+output.elasticsearch:
+  hosts: ["${ES_HOST:http://localhost:9200}"]
+  username: "${ELASTIC_USERNAME:}"
+  password: "${ELASTIC_PASSWORD:}"
+  index: "soc-logs-%{+yyyy.MM.dd}"
+
+setup.ilm.enabled: false
+setup.template.name: "soc-logs"
+setup.template.pattern: "soc-logs-*"
+setup.template.settings:
+  index.number_of_shards: 1
+  index.number_of_replicas: 1
+
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: C:/ProgramData/filebeat/logs
+  name: filebeat
+  keepfiles: 7
